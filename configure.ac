@@ -114,11 +114,6 @@ AC_C_INLINE
 
 AC_CHECK_DECL([LLONG_MAX], [have_llong_max=1], , [#include <limits.h>])
 AC_CHECK_DECL([LONG_LONG_MAX], [have_long_long_max=1], , [#include <limits.h>])
-AC_CHECK_DECL([SYSTR_POLICY_KILL], [have_systr_policy_kill=1], , [
-	#include <sys/types.h>
-	#include <sys/param.h>
-	#include <dev/systrace.h>
-])
 AC_CHECK_DECL([RLIMIT_NPROC],
     [AC_DEFINE([HAVE_RLIMIT_NPROC], [], [sys/resource.h has RLIMIT_NPROC])], , [
 	#include <sys/types.h>
@@ -130,10 +125,12 @@ AC_CHECK_DECL([PR_SET_NO_NEW_PRIVS], [have_linux_no_new_privs=1], , [
 ])
 
 openssl=yes
+openssl_bin=openssl
 AC_ARG_WITH([openssl],
 	[  --without-openssl       Disable use of OpenSSL; use only limited internal crypto **EXPERIMENTAL** ],
 	[  if test "x$withval" = "xno" ; then
 		openssl=no
+		openssl_bin=""
 	   fi
 	]
 )
@@ -147,6 +144,7 @@ fi
 
 use_stack_protector=1
 use_toolchain_hardening=1
+use_retpoline=1
 AC_ARG_WITH([stackprotect],
     [  --without-stackprotect  Don't use compiler's stack protection], [
     if test "x$withval" = "xno"; then
@@ -156,6 +154,11 @@ AC_ARG_WITH([hardening],
     [  --without-hardening     Don't use toolchain hardening flags], [
     if test "x$withval" = "xno"; then
 	use_toolchain_hardening=0
+    fi ])
+AC_ARG_WITH([retpoline],
+    [  --without-retpoline     Enable retpoline spectre mitigation], [
+    if test "x$withval" = "xno"; then
+	use_retpoline=0
     fi ])
 
 # We use -Werror for the tests only so that we catch warnings like "this is
@@ -172,6 +175,29 @@ AC_COMPILE_IFELSE([AC_LANG_SOURCE([[int main(void) { return 0; }]])],
 CFLAGS="$saved_CFLAGS"
 
 if test "$GCC" = "yes" || test "$GCC" = "egcs"; then
+	AC_MSG_CHECKING([gcc version])
+	GCC_VER=`$CC -v 2>&1 | $AWK '/gcc version /{print $3}'`
+	case "$GCC_VER" in
+		1.*) no_attrib_nonnull=1 ;;
+		2.8* | 2.9*)
+		     no_attrib_nonnull=1
+		     ;;
+		2.*) no_attrib_nonnull=1 ;;
+		*) ;;
+	esac
+	AC_MSG_RESULT([$GCC_VER])
+
+	AC_MSG_CHECKING([clang version])
+	ver="`$CC -v 2>&1`"
+	if echo "$ver" | grep "Apple" >/dev/null; then
+		CLANG_VER=apple-`echo "$ver" | grep 'clang version' | \
+		    $SED 's/.*clang version //g' | $AWK '{print $1}'`
+	else
+		CLANG_VER=`echo "$ver" | grep 'clang version' | \
+		    $SED 's/.*clang version //g' | $AWK '{print $1}'`
+	fi
+	AC_MSG_RESULT([$CLANG_VER])
+
 	OSSH_CHECK_CFLAG_COMPILE([-pipe])
 	OSSH_CHECK_CFLAG_COMPILE([-Wunknown-warning-option])
 	OSSH_CHECK_CFLAG_COMPILE([-Wno-error=format-truncation])
@@ -191,8 +217,6 @@ if test "$GCC" = "yes" || test "$GCC" = "egcs"; then
 	OSSH_CHECK_CFLAG_COMPILE([-Wbitwise-instead-of-logical])
 	OSSH_CHECK_CFLAG_COMPILE([-fno-strict-aliasing])
     if test "x$use_toolchain_hardening" = "x1"; then
-	OSSH_CHECK_CFLAG_COMPILE([-mretpoline]) # clang
-	OSSH_CHECK_LDFLAG_LINK([-Wl,-z,retpolineplt])
 	OSSH_CHECK_CFLAG_COMPILE([-D_FORTIFY_SOURCE=2])
 	OSSH_CHECK_LDFLAG_LINK([-Wl,-z,relro])
 	OSSH_CHECK_LDFLAG_LINK([-Wl,-z,now])
@@ -203,20 +227,22 @@ if test "$GCC" = "yes" || test "$GCC" = "egcs"; then
 	# actually links. The test program compiled/linked includes a number
 	# of integer operations that should exercise this.
 	OSSH_CHECK_CFLAG_LINK([-ftrapv])
-	OSSH_CHECK_CFLAG_COMPILE([-fzero-call-used-regs=all])
+	# clang 15 seems to have a bug in -fzero-call-used-regs=all.  See
+	# https://bugzilla.mindrot.org/show_bug.cgi?id=3475 and
+	# https://github.com/llvm/llvm-project/issues/59242
+	# clang 17 has a different bug that causes an ICE when using this
+	# flag at all (https://bugzilla.mindrot.org/show_bug.cgi?id=3629)
+	case "$CLANG_VER" in
+	apple-15*) OSSH_CHECK_CFLAG_LINK([-fzero-call-used-regs=used]) ;;
+	17*)	;;
+	*)	OSSH_CHECK_CFLAG_LINK([-fzero-call-used-regs=used]) ;;
+	esac
 	OSSH_CHECK_CFLAG_COMPILE([-ftrivial-auto-var-init=zero])
     fi
-	AC_MSG_CHECKING([gcc version])
-	GCC_VER=`$CC -v 2>&1 | $AWK '/gcc version /{print $3}'`
-	case $GCC_VER in
-		1.*) no_attrib_nonnull=1 ;;
-		2.8* | 2.9*)
-		     no_attrib_nonnull=1
-		     ;;
-		2.*) no_attrib_nonnull=1 ;;
-		*) ;;
-	esac
-	AC_MSG_RESULT([$GCC_VER])
+    if test "x$use_retpoline" = "x1"; then
+	OSSH_CHECK_CFLAG_COMPILE([-mretpoline]) # clang
+	OSSH_CHECK_LDFLAG_LINK([-Wl,-z,retpolineplt])
+    fi
 
 	AC_MSG_CHECKING([if $CC accepts -fno-builtin-memset])
 	saved_CFLAGS="$CFLAGS"
@@ -417,6 +443,14 @@ AC_ARG_WITH([Werror],
 	]
 )
 
+dnl On some old platforms, sys/stat.h requires sys/types.h, but autoconf-2.71's
+dnl AC_CHECK_INCLUDES_DEFAULT checks for them in the opposite order.  If we
+dnl haven't detected it, recheck.
+if test "x$ac_cv_header_sys_stat_h" != "xyes"; then
+	unset ac_cv_header_sys_stat_h
+	AC_CHECK_HEADERS([sys/stat.h])
+fi
+
 AC_CHECK_HEADERS([ \
 	blf.h \
 	bstring.h \
@@ -475,7 +509,6 @@ AC_CHECK_HEADERS([ \
 	sys/ptrace.h \
 	sys/random.h \
 	sys/select.h \
-	sys/stat.h \
 	sys/stream.h \
 	sys/stropts.h \
 	sys/strtio.h \
@@ -581,6 +614,9 @@ SPP_MSG="no"
 # the --with-solaris-privs option and --with-sandbox=solaris).
 SOLARIS_PRIVS="no"
 
+# Default shared library extension
+SHLIBEXT=".so"
+
 # Check for some target-specific stuff
 case "$host" in
 *-*-aix*)
@@ -592,6 +628,7 @@ case "$host" in
 	AC_MSG_CHECKING([if compiler allows macro redefinitions])
 	AC_COMPILE_IFELSE(
 	    [AC_LANG_PROGRAM([[
+#include <stdlib.h>
 #define testmacro foo
 #define testmacro bar]],
 	    [[ exit(0); ]])],
@@ -699,6 +736,7 @@ case "$host" in
 	# Cygwin defines optargs, optargs as declspec(dllimport) for historical
 	# reasons which cause compile warnings, so we disable those warnings.
 	OSSH_CHECK_CFLAG_COMPILE([-Wno-attributes])
+	SHLIBEXT=".dll"
 	;;
 *-*-dgux*)
 	AC_DEFINE([IP_TOS_IS_BROKEN], [1],
@@ -758,6 +796,7 @@ int main(void) { if (NSVersionOfRunTimeLibrary("System") >= (60 << 16))
 	# cf. Apple bug 3710161 (not public, but searchable)
 	AC_DEFINE([BROKEN_POLL], [1],
 	    [System poll(2) implementation is broken])
+	SHLIBEXT=".dylib"
 	;;
 *-*-dragonfly*)
 	SSHDLIBS="$SSHDLIBS"
@@ -877,6 +916,7 @@ int main(void) { if (NSVersionOfRunTimeLibrary("System") >= (60 << 16))
 	AC_DEFINE([_PATH_BTMP], ["/var/log/btmp"], [log for bad login attempts])
 	AC_DEFINE([USE_BTMP])
 	AC_DEFINE([LINUX_OOM_ADJUST], [1], [Adjust Linux out-of-memory killer])
+	AC_DEFINE([SYSTEMD_NOTIFY], [1], [Have sshd notify systemd on start/reload])
 	inet6_default_4in6=yes
 	case `uname -r` in
 	1.*|2.0.*)
@@ -1054,7 +1094,7 @@ mips-sony-bsd|mips-sony-newsos4)
 	AC_DEFINE([SSH_TUN_OPENBSD], [1], [Open tunnel devices the OpenBSD way])
 	AC_DEFINE([SYSLOG_R_SAFE_IN_SIGHAND], [1],
 	    [syslog_r function is safe to use in in a signal handler])
-	TEST_MALLOC_OPTIONS="AFGJPRX"
+	TEST_MALLOC_OPTIONS="SJRU"
 	;;
 *-*-solaris*)
 	if test "x$withval" != "xno" ; then
@@ -1309,6 +1349,13 @@ EOD
 	AC_DEFINE([BROKEN_SETVBUF], [1],
 	    [LynxOS has broken setvbuf() implementation])
 	;;
+*-*-gnu*)
+	dnl GNU Hurd.  Needs to be after the linux and the other *-gnu entries.
+	dnl Target SUSv3/POSIX.1-2001 plus BSD specifics.
+	dnl _DEFAULT_SOURCE is the new name for _BSD_SOURCE
+	dnl _GNU_SOURCE is needed for setres*id prototypes.
+	CPPFLAGS="$CPPFLAGS -D_XOPEN_SOURCE=600 -D_BSD_SOURCE -D_DEFAULT_SOURCE -D_GNU_SOURCE"
+	;;
 esac
 
 AC_MSG_CHECKING([compiler and flags for sanity])
@@ -1444,7 +1491,7 @@ else
 	[[
 	int a=0, b=0, c=0, d=0, n, v;
 	n = sscanf(ZLIB_VERSION, "%d.%d.%d.%d", &a, &b, &c, &d);
-	if (n != 3 && n != 4)
+	if (n < 1)
 		exit(1);
 	v = a*1000000 + b*10000 + c*100 + d;
 	fprintf(stderr, "found zlib version %s (%d)\n", ZLIB_VERSION, v);
@@ -1726,6 +1773,48 @@ AC_ARG_WITH([libedit],
 	fi ]
 )
 
+# Check whether user wants wtmpdb support
+WTMPDB_MSG="no"
+AC_ARG_WITH([wtmpdb],
+	[  --with-wtmpdb[[=PATH]]   Enable wtmpdb support for sshd],
+	[ if test "x$withval" != "xno" ; then
+		if test "x$withval" = "xyes" ; then
+			if test "x$PKGCONFIG" != "xno"; then
+				AC_MSG_CHECKING([if $PKGCONFIG knows about wtmpdb])
+				if "$PKGCONFIG" libwtmpdb; then
+					AC_MSG_RESULT([yes])
+					use_pkgconfig_for_libwtmpdb=yes
+				else
+					AC_MSG_RESULT([no])
+				fi
+			fi
+		else
+			CPPFLAGS="$CPPFLAGS -I${withval}/include"
+			if test -n "${rpath_opt}"; then
+				LDFLAGS="-L${withval}/lib ${rpath_opt}${withval}/lib ${LDFLAGS}"
+			else
+				LDFLAGS="-L${withval}/lib ${LDFLAGS}"
+			fi
+		fi
+		if test "x$use_pkgconfig_for_libwtmpdb" = "xyes"; then
+			LIBWTMPDB=`$PKGCONFIG --libs libwtmpdb`
+			CPPFLAGS="$CPPFLAGS `$PKGCONFIG --cflags libwtmpdb`"
+		else
+			LIBWTMPDB="-lwtmpdb"
+		fi
+		OTHERLIBS=`echo $LIBWTMPDB | sed 's/-lwtmpdb//'`
+		AC_CHECK_LIB([wtmpdb], [wtmpdb_login],
+			[ AC_DEFINE([USE_WTMPDB], [1], [Use libwtmpdb for sshd])
+			  WTMPDB_MSG="yes"
+			  AC_SUBST([LIBWTMPDB])
+			],
+			[ AC_MSG_ERROR([libwtmpdb not found]) ],
+			[ $OTHERLIBS ]
+		)
+	fi ]
+)
+
+
 AUDIT_MODULE=none
 AC_ARG_WITH([audit],
 	[  --with-audit=module     Enable audit support (modules=debug,bsm,linux)],
@@ -1840,6 +1929,8 @@ AC_SUBST([PICFLAG])
 
 dnl    Checks for library functions. Please keep in alphabetical order
 AC_CHECK_FUNCS([ \
+	auth_hostok \
+	auth_timeok \
 	Blowfish_initstate \
 	Blowfish_expandstate \
 	Blowfish_expand0state \
@@ -1965,7 +2056,6 @@ AC_CHECK_FUNCS([ \
 	strtoll \
 	strtoul \
 	strtoull \
-	swap32 \
 	sysconf \
 	tcgetpgrp \
 	timegm \
@@ -2035,6 +2125,22 @@ enable_sk_internal=
 AC_ARG_WITH([security-key-builtin],
 	[  --with-security-key-builtin include builtin U2F/FIDO support],
 	[ enable_sk_internal=$withval ]
+)
+
+enable_sk_standalone=
+AC_ARG_WITH([security-key-standalone],
+	[  --with-security-key-standalone build standalone sk-libfido2 SecurityKeyProvider],
+	[ enable_sk_standalone=$withval ]
+)
+
+enable_dsa=
+AC_ARG_ENABLE([dsa-keys],
+	[  --enable-dsa-keys       enable DSA key support [no]],
+	[
+		if test "x$enableval" != "xno" ; then
+			enable_dsa=1
+		fi
+	]
 )
 
 AC_SEARCH_LIBS([dlopen], [dl])
@@ -2663,6 +2769,7 @@ AC_CHECK_FUNCS([getpgrp],[
 # Search for OpenSSL
 saved_CPPFLAGS="$CPPFLAGS"
 saved_LDFLAGS="$LDFLAGS"
+openssl_bin_PATH="$PATH"
 AC_ARG_WITH([ssl-dir],
 	[  --with-ssl-dir=PATH     Specify path to OpenSSL installation ],
 	[
@@ -2692,9 +2799,20 @@ AC_ARG_WITH([ssl-dir],
 			else
 				CPPFLAGS="-I${withval} ${CPPFLAGS}"
 			fi
+			dnl Ensure specified openssl binary works, eg it can
+			dnl find its runtime libraries, before trying to use.
+			if test -x "${withval}/bin/openssl" && \
+			    "${withval}/bin/openssl" version >/dev/null 2>&1; then
+				openssl_bin_PATH="${withval}/bin${PATH_SEPARATOR}${PATH}"
+			elif test -x "${withval}/apps/openssl" && \
+			    "${withval}/apps/openssl" version >/dev/null 2>&1; then
+				openssl_bin_PATH="${withval}/apps${PATH_SEPARATOR}${PATH}"
+			fi
 		fi
 	]
 )
+AC_PATH_PROGS([openssl_bin], openssl, [], [$openssl_bin_PATH])
+AC_SUBST(OPENSSL_BIN, [${openssl_bin}])
 
 AC_ARG_WITH([openssl-header-check],
 	[  --without-openssl-header-check Disable OpenSSL version consistency check],
@@ -2756,8 +2874,8 @@ if test "x$openssl" = "xyes" ; then
 			AC_MSG_RESULT([$ssl_header_ver])
 		],
 		[
-			AC_MSG_RESULT([not found])
-			AC_MSG_ERROR([OpenSSL version header not found.])
+			AC_MSG_RESULT([failed])
+			AC_MSG_ERROR([OpenSSL version test program failed.])
 		],
 		[
 			AC_MSG_WARN([cross compiling: not checking])
@@ -2778,55 +2896,59 @@ if test "x$openssl" = "xyes" ; then
 	#include <openssl/crypto.h>
 	#define DATA "conftest.ssllibver"
 		]], [[
-		FILE *fd;
-		int rc;
-
-		fd = fopen(DATA,"w");
-		if(fd == NULL)
+		FILE *f;
+		/* We need these legacy bits to warn for old libcrypto */
+		#ifndef OPENSSL_VERSION
+		# define OPENSSL_VERSION SSLEAY_VERSION
+		#endif
+		#ifndef HAVE_OPENSSL_VERSION
+		# define OpenSSL_version       SSLeay_version
+		#endif
+		#ifndef HAVE_OPENSSL_VERSION_NUM
+		# define OpenSSL_version_num   SSLeay
+		#endif
+		if ((f = fopen(DATA, "w")) == NULL)
 			exit(1);
-#ifndef OPENSSL_VERSION
-# define OPENSSL_VERSION SSLEAY_VERSION
-#endif
-#ifndef HAVE_OPENSSL_VERSION
-# define OpenSSL_version	SSLeay_version
-#endif
-#ifndef HAVE_OPENSSL_VERSION_NUM
-# define OpenSSL_version_num	SSLeay
-#endif
-		if ((rc = fprintf(fd, "%08lx (%s)\n",
+		if (fprintf(f, "%08lx (%s)",
 		    (unsigned long)OpenSSL_version_num(),
-		    OpenSSL_version(OPENSSL_VERSION))) < 0)
+		    OpenSSL_version(OPENSSL_VERSION)) < 0)
 			exit(1);
-
+#ifdef LIBRESSL_VERSION_NUMBER
+		if (fprintf(f, " libressl-%08lx", LIBRESSL_VERSION_NUMBER) < 0)
+			exit(1);
+#endif
+		if (fputc('\n', f) == EOF || fclose(f) == EOF)
+			exit(1);
 		exit(0);
 		]])],
 		[
-			ssl_library_ver=`cat conftest.ssllibver`
+			sslver=`cat conftest.ssllibver`
+			ssl_showver=`echo "$sslver" | sed 's/ libressl-.*//'`
 			# Check version is supported.
-			case "$ssl_library_ver" in
-			10000*|0*)
-				AC_MSG_ERROR([OpenSSL >= 1.0.1 required (have "$ssl_library_ver")])
-		                ;;
-			100*)   ;; # 1.0.x
-			101000[[0123456]]*)
-				# https://github.com/openssl/openssl/pull/4613
-				AC_MSG_ERROR([OpenSSL 1.1.x versions prior to 1.1.0g have a bug that breaks their use with OpenSSH (have "$ssl_library_ver")])
+			case "$sslver" in
+			100*|10100*) # 1.0.x, 1.1.0x
+				AC_MSG_ERROR([OpenSSL >= 1.1.1 required (have "$ssl_showver")])
 				;;
 			101*)   ;; # 1.1.x
-			200*)   ;; # LibreSSL
-			300*)
-				# OpenSSL 3; we use the 1.1x API
-				CPPFLAGS="$CPPFLAGS -DOPENSSL_API_COMPAT=0x10100000L"
+			200*)   # LibreSSL
+				lver=`echo "$sslver" | sed 's/.*libressl-//'`
+				case "$lver" in
+				2*|300*) # 2.x, 3.0.0
+					AC_MSG_ERROR([LibreSSL >= 3.1.0 required (have "$ssl_showver")])
+					;;
+				*) ;;	# Assume all other versions are good.
+				esac
 				;;
-			301*|302*)
-				# OpenSSL development branch; request 1.1x API
+			30*)
+				# OpenSSL 3; we use the 1.1x API
+				# https://openssl.org/policies/general/versioning-policy.html
 				CPPFLAGS="$CPPFLAGS -DOPENSSL_API_COMPAT=0x10100000L"
 				;;
 		        *)
-				AC_MSG_ERROR([Unknown/unsupported OpenSSL version ("$ssl_library_ver")])
+				AC_MSG_ERROR([Unknown/unsupported OpenSSL version ("$ssl_showver")])
 		                ;;
 			esac
-			AC_MSG_RESULT([$ssl_library_ver])
+			AC_MSG_RESULT([$ssl_showver])
 		],
 		[
 			AC_MSG_RESULT([not found])
@@ -2839,7 +2961,7 @@ if test "x$openssl" = "xyes" ; then
 
 	case "$host" in
 	x86_64-*)
-		case "$ssl_library_ver" in
+		case "$sslver" in
 		3000004*)
 			AC_MSG_ERROR([OpenSSL 3.0.4 has a potential RCE in its RSA implementation (CVE-2022-2274)])
 			;;
@@ -2855,9 +2977,6 @@ if test "x$openssl" = "xyes" ; then
 	#include <openssl/opensslv.h>
 	#include <openssl/crypto.h>
 		]], [[
-#ifndef HAVE_OPENSSL_VERSION_NUM
-# define OpenSSL_version_num	SSLeay
-#endif
 		exit(OpenSSL_version_num() == OPENSSL_VERSION_NUMBER ? 0 : 1);
 		]])],
 		[
@@ -2912,6 +3031,8 @@ if test "x$openssl" = "xyes" ; then
 		BN_is_prime_ex \
 		DES_crypt \
 		DSA_generate_parameters_ex \
+		EVP_DigestSign \
+		EVP_DigestVerify \
 		EVP_DigestFinal_ex \
 		EVP_DigestInit_ex \
 		EVP_MD_CTX_cleanup \
@@ -2931,44 +3052,13 @@ if test "x$openssl" = "xyes" ; then
 	    )
 	)
 
-	# LibreSSL/OpenSSL 1.1x API
+	# LibreSSL/OpenSSL API differences
 	AC_CHECK_FUNCS([ \
-		OPENSSL_init_crypto \
-		DH_get0_key \
-		DH_get0_pqg \
-		DH_set0_key \
-		DH_set_length \
-		DH_set0_pqg \
-		DSA_get0_key \
-		DSA_get0_pqg \
-		DSA_set0_key \
-		DSA_set0_pqg \
-		DSA_SIG_get0 \
-		DSA_SIG_set0 \
-		ECDSA_SIG_get0 \
-		ECDSA_SIG_set0 \
 		EVP_CIPHER_CTX_iv \
 		EVP_CIPHER_CTX_iv_noconst \
 		EVP_CIPHER_CTX_get_iv \
 		EVP_CIPHER_CTX_get_updated_iv \
 		EVP_CIPHER_CTX_set_iv \
-		RSA_get0_crt_params \
-		RSA_get0_factors \
-		RSA_get0_key \
-		RSA_set0_crt_params \
-		RSA_set0_factors \
-		RSA_set0_key \
-		RSA_meth_free \
-		RSA_meth_dup \
-		RSA_meth_set1_name \
-		RSA_meth_get_finish \
-		RSA_meth_set_priv_enc \
-		RSA_meth_set_priv_dec \
-		RSA_meth_set_finish \
-		EVP_PKEY_get0_RSA \
-		EVP_MD_CTX_new \
-		EVP_MD_CTX_free \
-		EVP_chacha20 \
 	])
 
 	if test "x$openssl_engine" = "xyes" ; then
@@ -2987,7 +3077,7 @@ if test "x$openssl" = "xyes" ; then
 	fi
 
 	# Check for OpenSSL without EVP_aes_{192,256}_cbc
-	AC_MSG_CHECKING([whether OpenSSL has crippled AES support])
+	AC_MSG_CHECKING([whether OpenSSL lacks support for AES 192/256])
 	AC_LINK_IFELSE(
 		[AC_LANG_PROGRAM([[
 	#include <stdlib.h>
@@ -3026,8 +3116,8 @@ if test "x$openssl" = "xyes" ; then
 		]
 	)
 
-	# Check for SHA256, SHA384 and SHA512 support in OpenSSL
-	AC_CHECK_FUNCS([EVP_sha256 EVP_sha384 EVP_sha512])
+	# Check for various EVP support in OpenSSL
+	AC_CHECK_FUNCS([EVP_sha256 EVP_sha384 EVP_sha512 EVP_chacha20])
 
 	# Check complete ECC support in OpenSSL
 	AC_MSG_CHECKING([whether OpenSSL has NID_X9_62_prime256v1])
@@ -3137,6 +3227,50 @@ if test "x$openssl" = "xyes" ; then
 			ecdsa-sha2-nistp521 \
 			ecdsa-sha2-nistp521-cert-v01@openssh.com"
 	fi
+
+	# Check libcrypto ED25519 support
+	AC_CHECK_FUNCS([EVP_PKEY_get_raw_public_key])
+	AC_CHECK_FUNCS([EVP_PKEY_get_raw_private_key])
+	AC_MSG_CHECKING([whether OpenSSL has ED25519 support])
+	AC_LINK_IFELSE(
+		[AC_LANG_PROGRAM([[
+	#include <string.h>
+	#include <openssl/evp.h>
+		]], [[
+		unsigned char buf[64];
+		memset(buf, 0, sizeof(buf));
+		exit(EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL,
+		    buf, sizeof(buf)) == NULL);
+		]])],
+		[
+			AC_MSG_RESULT([yes])
+			AC_DEFINE([OPENSSL_HAS_ED25519], [1],
+			    [libcrypto has ed25519 support])
+		],
+		[
+			AC_MSG_RESULT([no])
+		]
+	)
+
+	openssl_dsa=no
+	if test ! -z "$enable_dsa" ; then
+		AC_CHECK_DECLS([OPENSSL_NO_DSA], [], [
+			AC_CHECK_DECLS([OPENSSL_IS_BORINGSSL], [],
+			    [ openssl_dsa=yes ],
+			    [ #include <openssl/opensslconf.h> ]
+			)
+		    ],
+		    [ #include <openssl/opensslconf.h> ]
+		)
+		AC_MSG_CHECKING([whether to enable DSA key support])
+		if test "x$openssl_dsa" = "xno"; then
+			AC_MSG_ERROR([DSA requested but not supported by OpenSSL])
+		else
+			AC_MSG_RESULT([yes])
+			AC_DEFINE([WITH_DSA], [1],
+			   [DSA keys explicitly enabled])
+		fi
+	fi
 fi
 
 # PKCS11/U2F depend on OpenSSL and dlopen().
@@ -3221,7 +3355,7 @@ if test "x$enable_sk" = "xyes" -a "x$enable_sk_internal" != "xno" ; then
 		    [Enable for built-in U2F/FIDO support])
 		enable_sk="built-in"
 		saved_LIBS="$LIBS"
-		LIBS="$LIBS $LIBFIDO2"
+		LIBS="$LIBFIDO2 $LIBS"
 		AC_CHECK_FUNCS([ \
 			fido_assert_set_clientdata \
 			fido_cred_prot \
@@ -3234,6 +3368,16 @@ if test "x$enable_sk" = "xyes" -a "x$enable_sk_internal" != "xno" ; then
 		])
 		LIBS="$saved_LIBS"
 	fi
+fi
+
+# Check for standalone SecurityKeyProvider
+AC_MSG_CHECKING([whether to build standalone sk-libfido2])
+if test "x$enable_sk_standalone" = "xyes" ; then
+	AC_MSG_RESULT([yes])
+	AC_SUBST([SK_STANDALONE], [sk-libfido2$SHLIBEXT])
+else
+	AC_MSG_RESULT([no])
+	AC_SUBST([SK_STANDALONE], [""])
 fi
 
 AC_CHECK_FUNCS([ \
@@ -3528,7 +3672,7 @@ AC_CHECK_TYPES([nfds_t], , , [
 # Decide which sandbox style to use
 sandbox_arg=""
 AC_ARG_WITH([sandbox],
-	[  --with-sandbox=style    Specify privilege separation sandbox (no, capsicum, darwin, rlimit, seccomp_filter, systrace, pledge)],
+	[  --with-sandbox=style    Specify privilege separation sandbox (no, capsicum, darwin, rlimit, seccomp_filter)],
 	[
 		if test "x$withval" = "xyes" ; then
 			sandbox_arg=""
@@ -3645,19 +3789,7 @@ if test "x$sandbox_arg" != "xno"; then
     )
 fi
 
-if test "x$sandbox_arg" = "xpledge" || \
-   ( test -z "$sandbox_arg" && test "x$ac_cv_func_pledge" = "xyes" ) ; then
-	test "x$ac_cv_func_pledge" != "xyes" && \
-		AC_MSG_ERROR([pledge sandbox requires pledge(2) support])
-	SANDBOX_STYLE="pledge"
-	AC_DEFINE([SANDBOX_PLEDGE], [1], [Sandbox using pledge(2)])
-elif test "x$sandbox_arg" = "xsystrace" || \
-   ( test -z "$sandbox_arg" && test "x$have_systr_policy_kill" = "x1" ) ; then
-	test "x$have_systr_policy_kill" != "x1" && \
-		AC_MSG_ERROR([systrace sandbox requires systrace headers and SYSTR_POLICY_KILL support])
-	SANDBOX_STYLE="systrace"
-	AC_DEFINE([SANDBOX_SYSTRACE], [1], [Sandbox using systrace(4)])
-elif test "x$sandbox_arg" = "xdarwin" || \
+if test "x$sandbox_arg" = "xdarwin" || \
      ( test -z "$sandbox_arg" && test "x$ac_cv_func_sandbox_init" = "xyes" && \
        test "x$ac_cv_header_sandbox_h" = "xyes") ; then
 	test "x$ac_cv_func_sandbox_init" != "xyes" -o \
@@ -4276,7 +4408,11 @@ int main(void)
 	long long num = 0x7fffffffffffffffll;
 #endif
 	strcpy(expected_out, "9223372036854775807");
+#if (SIZEOF_LONG_INT == 8)
+	snprintf(buf, mazsize, "%ld", num);
+#else
 	snprintf(buf, mazsize, "%lld", num);
+#endif
 	if(strcmp(buf, expected_out) != 0)
 		exit(1);
 	exit(0);
@@ -5262,6 +5398,16 @@ AC_DEFINE_UNQUOTED([_PATH_SSH_PIDDIR], ["$piddir"],
 	[Specify location of ssh.pid])
 AC_SUBST([piddir])
 
+
+AC_ARG_ENABLE([fd-passing],
+	[  --disable-fd-passing    disable file descriptor passsing [no]],
+	[
+		if test "x$enableval" = "xno" ; then
+			AC_DEFINE([DISABLE_FD_PASSING])
+		fi
+	]
+)
+
 dnl allow user to disable some login recording features
 AC_ARG_ENABLE([lastlog],
 	[  --disable-lastlog       disable use of lastlog even if detected [no]],
@@ -5548,6 +5694,15 @@ AC_SUBST([TEST_SSH_UTF8], [$TEST_SSH_UTF8])
 AC_SUBST([TEST_MALLOC_OPTIONS], [$TEST_MALLOC_OPTIONS])
 AC_SUBST([UNSUPPORTED_ALGORITHMS], [$unsupported_algorithms])
 AC_SUBST([DEPEND], [$(cat $srcdir/.depend)])
+
+# Binaries for interop tests.
+AC_PATH_PROG([PLINK], [plink])
+AC_PATH_PROG([PUTTYGEN], [puttygen])
+AC_PATH_PROG([CONCH], [conch])
+AC_PATH_PROG([DROPBEAR], [dropbear])
+AC_PATH_PROG([DBCLIENT], [dbclient])
+AC_PATH_PROG([DROPBEARKEY], [dropbearkey])
+AC_PATH_PROG([DROPBEARCONVERT], [dropbearconvert])
 
 CFLAGS="${CFLAGS} ${CFLAGS_AFTER}"
 LDFLAGS="${LDFLAGS} ${LDFLAGS_AFTER}"

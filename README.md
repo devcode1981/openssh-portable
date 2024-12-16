@@ -2,6 +2,7 @@
 
 [![C/C++ CI](https://github.com/openssh/openssh-portable/actions/workflows/c-cpp.yml/badge.svg)](https://github.com/openssh/openssh-portable/actions/workflows/c-cpp.yml)
 [![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/openssh.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:openssh)
+[![Coverity Status](https://scan.coverity.com/projects/21341/badge.svg)](https://scan.coverity.com/projects/openssh-portable)
 
 OpenSSH is a complete implementation of the SSH protocol (version 2) for secure remote login, command execution and file transfer. It includes a client ``ssh`` and server ``sshd``, file transfer utilities ``scp`` and ``sftp`` as well as tools for key generation (``ssh-keygen``), run-time key storage (``ssh-agent``) and a number of supporting programs.
 
@@ -40,7 +41,7 @@ In addition, certain platforms and build-time options may require additional dep
 
 ### Building a release
 
-Releases include a pre-built copy of the ``configure`` script and may be built using:
+Release tarballs and release branches in git include a pre-built copy of the ``configure`` script and may be built using:
 
 ```
 tar zxvf openssh-X.YpZ.tar.gz
@@ -53,7 +54,7 @@ See the [Build-time Customisation](#build-time-customisation) section below for 
 
 ### Building from git
 
-If building from git, you'll need [autoconf](https://www.gnu.org/software/autoconf/) installed to build the ``configure`` script. The following commands will check out and build portable OpenSSH from git:
+If building from the git master branch, you'll need [autoconf](https://www.gnu.org/software/autoconf/) installed to build the ``configure`` script. The following commands will check out and build portable OpenSSH from git:
 
 ```
 git clone https://github.com/openssh/openssh-portable # or https://anongit.mindrot.org/openssh.git
